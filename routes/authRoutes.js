@@ -39,6 +39,42 @@ const getUserAccessProfile = async (userId) => {
   };
 };
 
+const computeAllowedCities = (userRow, access) => {
+  const isAdminRole =
+    (userRow?.role || "").toLowerCase() === "admin" ||
+    access?.roles?.some(
+      (role) => (role.name || "").toLowerCase() === "admin"
+    );
+  if (isAdminRole) {
+    return null; // all cities
+  }
+
+  const scope =
+    access.permissions
+      ?.filter(
+        (perm) =>
+          perm.module?.toLowerCase() === "city" &&
+          perm.action?.toLowerCase() === "view"
+      )
+      .reduce(
+        (acc, perm) => {
+          if (perm.city_id === null || perm.city_id === undefined) {
+            acc.all = true;
+          } else {
+            acc.ids.add(Number(perm.city_id));
+          }
+          return acc;
+        },
+        { all: false, ids: new Set() }
+      ) || { all: false, ids: new Set() };
+
+  if (scope.all) return null;
+  const list = Array.from(scope.ids.values()).filter((id) =>
+    Number.isFinite(id)
+  );
+  return list.length ? list : [];
+};
+
 // ✅ Get Logged-in User
 router.get("/me", authenticateToken, async (req, res) => {
   try {
@@ -53,30 +89,12 @@ router.get("/me", authenticateToken, async (req, res) => {
 
     const access = await getUserAccessProfile(req.user.user_id);
 
-    const allowedCities =
-      access.permissions
-        ?.filter(
-          (perm) =>
-            perm.module?.toLowerCase() === "city" &&
-            perm.action?.toLowerCase() === "view"
-        )
-        .reduce((acc, perm) => {
-          if (perm.city_id === null || perm.city_id === undefined) {
-            acc.all = true;
-          } else {
-            acc.ids.add(Number(perm.city_id));
-          }
-          return acc;
-        }, { all: false, ids: new Set() }) || { all: false, ids: new Set() };
+    const allowedCities = computeAllowedCities(user.rows[0], access);
 
     res.json({
       ...user.rows[0],
       access,
-      allowedCities: allowedCities.all
-        ? null
-        : Array.from(allowedCities.ids.values()).filter((id) =>
-            Number.isFinite(id)
-          ),
+      allowedCities,
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -234,21 +252,7 @@ router.post("/login", async (req, res) => {
       access.roles?.[0]?.name || user.rows[0].role || "user";
 
     res.cookie("token", token, { httpOnly: true });
-    const allowedCities =
-      access.permissions
-        ?.filter(
-          (perm) =>
-            perm.module?.toLowerCase() === "city" &&
-            perm.action?.toLowerCase() === "view"
-        )
-        .reduce((acc, perm) => {
-          if (perm.city_id === null || perm.city_id === undefined) {
-            acc.all = true;
-          } else {
-            acc.ids.add(Number(perm.city_id));
-          }
-          return acc;
-        }, { all: false, ids: new Set() }) || { all: false, ids: new Set() };
+    const allowedCities = computeAllowedCities(user.rows[0], access);
 
     res.json({
       message: "Login successful",
@@ -262,11 +266,7 @@ router.post("/login", async (req, res) => {
         permissions: access.permissions,
         emp_code: user.rows[0].emp_code,
         phone: user.rows[0].phone,
-        allowedCities: allowedCities.all
-          ? null
-          : Array.from(allowedCities.ids.values()).filter((id) =>
-              Number.isFinite(id)
-            ),
+        allowedCities,
       },
     });
   } catch (error) {
@@ -309,21 +309,7 @@ router.post("/supervisor-login", async (req, res) => {
 
     const access = await getUserAccessProfile(user.rows[0].user_id);
 
-    const allowedCities =
-      access.permissions
-        ?.filter(
-          (perm) =>
-            perm.module?.toLowerCase() === "city" &&
-            perm.action?.toLowerCase() === "view"
-        )
-        .reduce((acc, perm) => {
-          if (perm.city_id === null || perm.city_id === undefined) {
-            acc.all = true;
-          } else {
-            acc.ids.add(Number(perm.city_id));
-          }
-          return acc;
-        }, { all: false, ids: new Set() }) || { all: false, ids: new Set() };
+    const allowedCities = computeAllowedCities(user.rows[0], access);
 
     res.json({
       success: true,
@@ -338,11 +324,7 @@ router.post("/supervisor-login", async (req, res) => {
         permissions: access.permissions,
         emp_code: user.rows[0].emp_code,
         phone: user.rows[0].phone,
-        allowedCities: allowedCities.all
-          ? null
-          : Array.from(allowedCities.ids.values()).filter((id) =>
-              Number.isFinite(id)
-            ),
+        allowedCities,
       },
     });
   } catch (error) {
