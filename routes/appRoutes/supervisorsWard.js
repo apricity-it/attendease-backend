@@ -1,7 +1,11 @@
 const express = require("express");
 const router = express.Router();
 const pool = require("../../config/db");
-const authenticate = require("../../middleware/authenticate");
+const authenticate = require("../../middleware/authMiddleware");
+const {
+  authorize,
+  getPermissionCityFilter,
+} = require("../../middleware/permissionMiddleware");
 const { buildPublicFaceUrl } = require("../../utils/faceImage");
 const { isBackblazeUrl } = require("../../utils/backblaze");
 
@@ -73,6 +77,32 @@ const normalizeCityIdInput = (value) => {
   }
 
   return { cityId: null, valid: false };
+};
+
+const enforceCityScope = (req, requestedCityId) => {
+  const scope = getPermissionCityFilter(req, "dashboard", "view");
+  if (!Array.isArray(scope) || scope.length === 0) {
+    return { cityId: requestedCityId, allowed: true };
+  }
+
+  const allowedCityIds = scope
+    .map((cityId) => Number(cityId))
+    .filter((cityId) => Number.isFinite(cityId));
+
+  if (!allowedCityIds.length) {
+    return { cityId: requestedCityId, allowed: true };
+  }
+
+  if (requestedCityId === null || requestedCityId === undefined) {
+    return { cityId: allowedCityIds[0], allowed: true };
+  }
+
+  const numeric = Number(requestedCityId);
+  if (!Number.isFinite(numeric)) {
+    return { cityId: null, allowed: false };
+  }
+
+  return { cityId: numeric, allowed: allowedCityIds.includes(numeric) };
 };
 
 const resolveDateRange = (rawStart, rawEnd) => {
@@ -402,8 +432,10 @@ const fetchCitySummary = async (userId, cityId, startDate, endDate) => {
   }));
 };
 
+router.use(authenticate, authorize("dashboard", "view"));
+
 // Summary endpoint for mobile (GET with authentication)
-router.get("/summary", authenticate, async (req, res) => {
+router.get("/summary", async (req, res) => {
   const requestingUser = req.user;
   const isAdmin = requestingUser?.role === "admin";
   const effectiveUserId = isAdmin ? null : requestingUser?.user_id;
@@ -417,12 +449,22 @@ router.get("/summary", authenticate, async (req, res) => {
     return res.status(400).json({ error: "Invalid city ID" });
   }
 
+  const { cityId: scopedCityId, allowed } = enforceCityScope(
+    req,
+    cityId ?? null
+  );
+  if (!allowed) {
+    return res
+      .status(403)
+      .json({ error: "Forbidden: city not permitted for dashboard" });
+  }
+
   try {
     const { startDate: startDateRaw, endDate: endDateRaw } = req.query;
     const { startDate, endDate } = resolveDateRange(startDateRaw, endDateRaw);
     const summary = await fetchSupervisorSummary(
       effectiveUserId,
-      cityId,
+      scopedCityId,
       startDate,
       endDate
     );
@@ -435,7 +477,7 @@ router.get("/summary", authenticate, async (req, res) => {
 });
 
 // GET endpoint for mobile app (uses JWT token)
-router.get("/", authenticate, async (req, res) => {
+router.get("/", async (req, res) => {
   const requestingUser = req.user;
   const isAdmin = requestingUser?.role === "admin";
   const effectiveUserId = isAdmin ? null : requestingUser?.user_id;
@@ -449,12 +491,22 @@ router.get("/", authenticate, async (req, res) => {
     return res.status(400).json({ error: "Invalid city ID" });
   }
 
+  const { cityId: scopedCityId, allowed } = enforceCityScope(
+    req,
+    cityId ?? null
+  );
+  if (!allowed) {
+    return res
+      .status(403)
+      .json({ error: "Forbidden: city not permitted for dashboard" });
+  }
+
   try {
     const { startDate: startDateRaw, endDate: endDateRaw } = req.query;
     const { startDate, endDate } = resolveDateRange(startDateRaw, endDateRaw);
     const response = await fetchSupervisorEmployees(
       effectiveUserId,
-      cityId,
+      scopedCityId,
       startDate,
       endDate
     );
@@ -480,9 +532,31 @@ router.post("/city-summary", async (req, res) => {
     return res.status(400).json({ error: "Invalid city ID" });
   }
 
+  const requestingUser = req.user;
+  const isAdmin = requestingUser?.role === "admin";
+  const effectiveUserId = isAdmin ? userId : requestingUser?.user_id;
+  if (!isAdmin && !effectiveUserId) {
+    return res.status(400).json({ error: "User ID is required" });
+  }
+
+  const { cityId: scopedCityId, allowed } = enforceCityScope(
+    req,
+    cityId ?? null
+  );
+  if (!allowed) {
+    return res
+      .status(403)
+      .json({ error: "Forbidden: city not permitted for dashboard" });
+  }
+
   try {
     const { startDate, endDate } = resolveDateRange(startDateRaw, endDateRaw);
-    const summary = await fetchCitySummary(userId, cityId, startDate, endDate);
+    const summary = await fetchCitySummary(
+      effectiveUserId,
+      scopedCityId,
+      startDate,
+      endDate
+    );
 
     res.json({ success: true, data: summary });
   } catch (error) {
@@ -506,11 +580,28 @@ router.post("/summary", async (req, res) => {
     return res.status(400).json({ error: "Invalid city ID" });
   }
 
+  const requestingUser = req.user;
+  const isAdmin = requestingUser?.role === "admin";
+  const effectiveUserId = isAdmin ? userId : requestingUser?.user_id;
+  if (!isAdmin && !effectiveUserId) {
+    return res.status(400).json({ error: "User ID is required" });
+  }
+
+  const { cityId: scopedCityId, allowed } = enforceCityScope(
+    req,
+    cityId ?? null
+  );
+  if (!allowed) {
+    return res
+      .status(403)
+      .json({ error: "Forbidden: city not permitted for dashboard" });
+  }
+
   try {
     const { startDate, endDate } = resolveDateRange(startDateRaw, endDateRaw);
     const summary = await fetchSupervisorSummary(
-      userId,
-      cityId,
+      effectiveUserId,
+      scopedCityId,
       startDate,
       endDate
     );
@@ -537,11 +628,28 @@ router.post("/", async (req, res) => {
     return res.status(400).json({ error: "Invalid city ID" });
   }
 
+  const requestingUser = req.user;
+  const isAdmin = requestingUser?.role === "admin";
+  const effectiveUserId = isAdmin ? userId : requestingUser?.user_id;
+  if (!isAdmin && !effectiveUserId) {
+    return res.status(400).json({ error: "User ID is required" });
+  }
+
+  const { cityId: scopedCityId, allowed } = enforceCityScope(
+    req,
+    cityId ?? null
+  );
+  if (!allowed) {
+    return res
+      .status(403)
+      .json({ error: "Forbidden: city not permitted for dashboard" });
+  }
+
   try {
     const { startDate, endDate } = resolveDateRange(startDateRaw, endDateRaw);
     const response = await fetchSupervisorEmployees(
-      userId,
-      cityId,
+      effectiveUserId,
+      scopedCityId,
       startDate,
       endDate
     );

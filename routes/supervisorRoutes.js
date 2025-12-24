@@ -2,10 +2,40 @@ const express = require("express");
 const router = express.Router();
 const bcrypt = require("bcryptjs");
 const pool = require("../config/db");
-const authenticate = require("../middleware/authenticate"); // Ensure users are logged in
+const authenticate = require("../middleware/authMiddleware"); // Ensure users are logged in
+const {
+  authorize,
+  getPermissionCityFilter,
+} = require("../middleware/permissionMiddleware");
+
+const enforceCityScope = (req, requestedCityId) => {
+  const scope = getPermissionCityFilter(req, "supervisors", "view");
+  if (!Array.isArray(scope) || scope.length === 0) {
+    return { cityId: requestedCityId, allowed: true };
+  }
+
+  const allowedCityIds = scope
+    .map((cityId) => Number(cityId))
+    .filter((cityId) => Number.isFinite(cityId));
+
+  if (!allowedCityIds.length) {
+    return { cityId: requestedCityId, allowed: true };
+  }
+
+  if (requestedCityId === null || requestedCityId === undefined) {
+    return { cityId: allowedCityIds[0], allowed: true };
+  }
+
+  const numeric = Number(requestedCityId);
+  if (!Number.isFinite(numeric)) {
+    return { cityId: null, allowed: false };
+  }
+
+  return { cityId: numeric, allowed: allowedCityIds.includes(numeric) };
+};
 
 // ✅ Fetch all supervisors (Only Admins can fetch)
-router.get("/", async (req, res) => {
+router.get("/", authenticate, authorize("supervisors", "view"), async (req, res) => {
   const { cityId: rawCityId } = req.query;
 
   let cityId = null;
@@ -15,6 +45,16 @@ router.get("/", async (req, res) => {
       return res.status(400).json({ error: "Invalid city ID" });
     }
     cityId = parsed;
+  }
+
+  const { cityId: scopedCityId, allowed } = enforceCityScope(
+    req,
+    cityId ?? null
+  );
+  if (!allowed) {
+    return res
+      .status(403)
+      .json({ error: "Forbidden: city not permitted for supervisors" });
   }
 
   try {
@@ -38,7 +78,7 @@ router.get("/", async (req, res) => {
           AND ($1::int IS NULL OR c.city_id = $1::int)
         ORDER BY u.name
       `,
-      [cityId]
+      [scopedCityId ?? null]
     );
     res.json(supervisors.rows);
   } catch (error) {
