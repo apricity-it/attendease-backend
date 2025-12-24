@@ -77,21 +77,32 @@ const authorize = (requiredModule, requiredAction) => {
       }
 
       const permissionPayload = await fetchUserPermissions(userId);
-      const key = `${requiredModule}:${requiredAction}`.toLowerCase();
+      const requiredKey = `${requiredModule}:${requiredAction}`.toLowerCase();
+      const candidateKeys =
+        requiredAction === "view"
+          ? [requiredKey, `${requiredModule}:write`.toLowerCase()]
+          : [requiredKey];
 
-      if (!permissionPayload.set.has(key)) {
+      const matchedKey = candidateKeys.find((candidate) =>
+        permissionPayload.set.has(candidate)
+      );
+
+      if (!matchedKey) {
         return res
           .status(403)
-          .json({ error: "Forbidden: missing permission", permission: key });
+          .json({
+            error: "Forbidden: missing permission",
+            permission: requiredKey,
+          });
       }
 
       if (!req.permissionScopes) {
         req.permissionScopes = {};
       }
-      if (!req.permissionScopes[key]) {
-        const scope = permissionPayload.cityMap.get(key);
+      if (!req.permissionScopes[matchedKey]) {
+        const scope = permissionPayload.cityMap.get(matchedKey);
         if (scope) {
-          req.permissionScopes[key] = {
+          req.permissionScopes[matchedKey] = {
             all: scope.all,
             ids: new Set(scope.ids),
           };
@@ -108,7 +119,11 @@ const authorize = (requiredModule, requiredAction) => {
 
 const getPermissionCityFilter = (req, module, action) => {
   const key = `${module}:${action}`.toLowerCase();
-  const scope = req.permissionScopes?.[key];
+  const fallbackKey =
+    action === "view" ? `${module}:write`.toLowerCase() : null;
+  const scope =
+    req.permissionScopes?.[key] ||
+    (fallbackKey ? req.permissionScopes?.[fallbackKey] : null);
   if (!scope || scope.all || !scope.ids || scope.ids.size === 0) {
     return null;
   }
