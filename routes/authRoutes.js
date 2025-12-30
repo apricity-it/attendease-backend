@@ -3,6 +3,7 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const pool = require("../config/db");
 const authenticateToken = require("../middleware/authMiddleware"); // ✅ Import middleware
+const { fetchUserCityAccess } = require("../utils/userCityAccess");
 
 const router = express.Router();
 
@@ -39,7 +40,7 @@ const getUserAccessProfile = async (userId) => {
   };
 };
 
-const computeAllowedCities = (userRow, access) => {
+const computeAllowedCities = async (userRow, access) => {
   const isAdminRole =
     (userRow?.role || "").toLowerCase() === "admin" ||
     access?.roles?.some(
@@ -49,29 +50,15 @@ const computeAllowedCities = (userRow, access) => {
     return null; // all cities
   }
 
-  const scope =
-    access.permissions
-      ?.filter(
-        (perm) =>
-          perm.module?.toLowerCase() === "city" &&
-          perm.action?.toLowerCase() === "view"
-      )
-      .reduce(
-        (acc, perm) => {
-          if (perm.city_id === null || perm.city_id === undefined) {
-            acc.all = true;
-          } else {
-            acc.ids.add(Number(perm.city_id));
-          }
-          return acc;
-        },
-        { all: false, ids: new Set() }
-      ) || { all: false, ids: new Set() };
+  const scope = await fetchUserCityAccess(userRow);
+  if (scope.all) {
+    return null;
+  }
 
-  if (scope.all) return null;
-  const list = Array.from(scope.ids.values()).filter((id) =>
-    Number.isFinite(id)
-  );
+  const ids = Array.isArray(scope.ids) ? scope.ids : [];
+  const list = ids
+    .map((id) => Number(id))
+    .filter((id) => Number.isFinite(id));
   return list.length ? list : [];
 };
 
@@ -110,7 +97,7 @@ router.get("/me", authenticateToken, async (req, res) => {
 
     const access = await getUserAccessProfile(req.user.user_id);
 
-    const allowedCities = computeAllowedCities(user.rows[0], access);
+    const allowedCities = await computeAllowedCities(user.rows[0], access);
     const uiPermissions = buildUiPermissions(access);
 
     res.json({
@@ -275,7 +262,7 @@ router.post("/login", async (req, res) => {
       access.roles?.[0]?.name || user.rows[0].role || "user";
 
     res.cookie("token", token, { httpOnly: true });
-    const allowedCities = computeAllowedCities(user.rows[0], access);
+    const allowedCities = await computeAllowedCities(user.rows[0], access);
     const uiPermissions = buildUiPermissions(access);
 
     res.json({
@@ -334,7 +321,7 @@ router.post("/supervisor-login", async (req, res) => {
 
     const access = await getUserAccessProfile(user.rows[0].user_id);
 
-    const allowedCities = computeAllowedCities(user.rows[0], access);
+    const allowedCities = await computeAllowedCities(user.rows[0], access);
     const uiPermissions = buildUiPermissions(access);
 
     res.json({

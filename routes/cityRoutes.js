@@ -2,35 +2,41 @@ const express = require("express");
 const router = express.Router();
 const pool = require("../config/db");
 const authenticate = require("../middleware/authMiddleware");
-const {
-  authorize,
-  getPermissionCityFilter,
-} = require("../middleware/permissionMiddleware");
+const { authorize, getPermissionCityFilter } = require("../middleware/permissionMiddleware");
+const { attachCityScope, requireCityScope } = require("../middleware/cityScope");
 
 // 🟢 Fetch all cities
-router.get(
-  "/",
-  authenticate,
-  async (req, res) => {
+router.get("/", authenticate, attachCityScope, requireCityScope(true), async (req, res) => {
   try {
+    const scope = req.cityScope || { all: false, ids: [] };
+    const params = [];
+    let whereClause = "";
+
+    if (!scope.all) {
+      params.push(scope.ids);
+      whereClause = `WHERE city_id = ANY($${params.length})`;
+    }
+
     const result = await pool.query(
-      "SELECT * FROM public.cities ORDER BY city_id ASC"
+      `SELECT * FROM public.cities ${whereClause} ORDER BY city_id ASC`,
+      params
     );
-    const allowedCities = getPermissionCityFilter(req, "city", "view");
+
+    const permissionCities = getPermissionCityFilter(req, "city", "view");
     let rows = result.rows;
-    if (Array.isArray(allowedCities) && allowedCities.length > 0) {
+    if (Array.isArray(permissionCities) && permissionCities.length > 0) {
       const allowedSet = new Set(
-        allowedCities.map((cityId) => Number(cityId))
+        permissionCities.map((cityId) => Number(cityId))
       );
       rows = rows.filter((row) => allowedSet.has(Number(row.city_id)));
     }
+
     res.json(rows);
   } catch (error) {
     console.error("Error fetching cities:", error);
     res.status(500).json({ error: "Database error" });
   }
-  }
-);
+});
 
 // 🟢 Add a new city
 router.post(

@@ -3,32 +3,48 @@ const router = express.Router();
 const pool = require("../config/db");
 const authenticate = require("../middleware/authMiddleware");
 const { authorize, getPermissionCityFilter } = require("../middleware/permissionMiddleware");
+const { attachCityScope, requireCityScope } = require("../middleware/cityScope");
 
 // 🟢 Fetch all zones with city names
 router.get(
   "/",
   authenticate,
+  attachCityScope,
+  requireCityScope(true),
   async (req, res) => {
-  try {
-    const result = await pool.query(`
+    try {
+      const scope = req.cityScope || { all: false, ids: [] };
+      const params = [];
+      let whereClause = "";
+
+      if (!scope.all) {
+        params.push(scope.ids);
+        whereClause = `WHERE c.city_id = ANY($${params.length})`;
+      }
+
+      const result = await pool.query(
+        `
       SELECT z.zone_id, z.zone_name, c.city_id, c.city_name
       FROM zones z
       JOIN cities c ON z.city_id = c.city_id
+      ${whereClause}
       ORDER BY z.zone_id ASC
-    `);
-    const allowedCities = getPermissionCityFilter(req, "city", "view");
-    let rows = result.rows;
-    if (Array.isArray(allowedCities) && allowedCities.length > 0) {
-      const allowedSet = new Set(
-        allowedCities.map((cityId) => Number(cityId))
+    `,
+        params
       );
-      rows = rows.filter((row) => allowedSet.has(Number(row.city_id)));
+      const allowedCities = getPermissionCityFilter(req, "city", "view");
+      let rows = result.rows;
+      if (Array.isArray(allowedCities) && allowedCities.length > 0) {
+        const allowedSet = new Set(
+          allowedCities.map((cityId) => Number(cityId))
+        );
+        rows = rows.filter((row) => allowedSet.has(Number(row.city_id)));
+      }
+      res.json(rows);
+    } catch (error) {
+      console.error("Error fetching zones:", error);
+      res.status(500).json({ error: "Database error" });
     }
-    res.json(rows);
-  } catch (error) {
-    console.error("Error fetching zones:", error);
-    res.status(500).json({ error: "Database error" });
-  }
   }
 );
 

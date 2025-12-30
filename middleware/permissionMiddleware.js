@@ -1,4 +1,8 @@
 const pool = require("../config/db");
+const {
+  fetchUserCityAccess,
+  invalidateCityAccessCache,
+} = require("../utils/userCityAccess");
 
 const permissionCache = new Map();
 let cacheVersion = 0;
@@ -8,6 +12,60 @@ const buildCacheKey = (userId) => `${userId}:${cacheVersion}`;
 const invalidatePermissionCache = () => {
   cacheVersion += 1;
   permissionCache.clear();
+  invalidateCityAccessCache();
+};
+
+const normalizeScope = (scope) => {
+  if (!scope) {
+    return { all: false, ids: new Set() };
+  }
+
+  if (scope.all) {
+    return { all: true, ids: new Set() };
+  }
+
+  const rawIds = Array.isArray(scope.ids)
+    ? scope.ids
+    : Array.from(scope.ids || []);
+  const ids = rawIds
+    .map((id) => Number(id))
+    .filter((id) => Number.isFinite(id));
+
+  return { all: false, ids: new Set(ids) };
+};
+
+const combineCityScopes = (baseScope, permissionScope) => {
+  const base = normalizeScope(baseScope);
+  const permission = normalizeScope(permissionScope);
+
+  if (base.all) {
+    return { all: true, ids: new Set() };
+  }
+
+  if (permission.all) {
+    return { all: base.all, ids: new Set(base.ids) };
+  }
+
+  if (base.ids.size === 0 && permission.ids.size === 0) {
+    return { all: false, ids: new Set() };
+  }
+
+  if (permission.ids.size === 0) {
+    return { all: false, ids: new Set(base.ids) };
+  }
+
+  if (base.ids.size === 0) {
+    return { all: false, ids: new Set() };
+  }
+
+  const intersection = new Set();
+  base.ids.forEach((id) => {
+    if (permission.ids.has(id)) {
+      intersection.add(id);
+    }
+  });
+
+  return { all: false, ids: intersection };
 };
 
 const fetchUserPermissions = async (userId) => {
@@ -96,18 +154,18 @@ const authorize = (requiredModule, requiredAction) => {
           });
       }
 
+      const baseCityScope = await fetchUserCityAccess(req.user);
+      const permissionScope = permissionPayload.cityMap.get(matchedKey);
+
       if (!req.permissionScopes) {
         req.permissionScopes = {};
       }
-      if (!req.permissionScopes[matchedKey]) {
-        const scope = permissionPayload.cityMap.get(matchedKey);
-        if (scope) {
-          req.permissionScopes[matchedKey] = {
-            all: scope.all,
-            ids: new Set(scope.ids),
-          };
-        }
-      }
+
+      const combinedScope = combineCityScopes(baseCityScope, permissionScope);
+      req.permissionScopes[matchedKey] = {
+        all: combinedScope.all,
+        ids: combinedScope.ids,
+      };
 
       return next();
     } catch (error) {
@@ -121,13 +179,19 @@ const getPermissionCityFilter = (req, module, action) => {
   const key = `${module}:${action}`.toLowerCase();
   const fallbackKey =
     action === "view" ? `${module}:write`.toLowerCase() : null;
-  const scope =
+  const permissionScope =
     req.permissionScopes?.[key] ||
     (fallbackKey ? req.permissionScopes?.[fallbackKey] : null);
-  if (!scope || scope.all || !scope.ids || scope.ids.size === 0) {
+  const baseScope = req.cityScope || null;
+
+  const combinedScope = combineCityScopes(baseScope, permissionScope);
+  if (combinedScope.all) {
     return null;
   }
-  return Array.from(scope.ids);
+  if (!combinedScope.ids || combinedScope.ids.size === 0) {
+    return [];
+  }
+  return Array.from(combinedScope.ids);
 };
 
 module.exports = {
@@ -135,4 +199,5 @@ module.exports = {
   fetchUserPermissions,
   invalidatePermissionCache,
   getPermissionCityFilter,
+  combineCityScopes,
 };

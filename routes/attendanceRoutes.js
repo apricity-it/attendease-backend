@@ -20,8 +20,21 @@ router.use(authenticate, attachCityScope, requireCityScope());
 router.post("/", async (req, res) => {
   // Get the date from query parameters, if available; otherwise, default to IST date
   const date = req.query.date || formatDateIST(); // IST Date in YYYY-MM-DD format
+  const scope = req.cityScope || { all: false, ids: [] };
+  if (!scope.all && (!scope.ids || scope.ids.length === 0)) {
+    return res
+      .status(403)
+      .json({ error: "No city access assigned. Please contact admin." });
+  }
 
   try {
+    const params = [date];
+    let cityClause = "";
+    if (!scope.all) {
+      params.push(scope.ids);
+      cityClause = `AND c.city_id = ANY($${params.length})`;
+    }
+
     const result = await pool.query(
       `SELECT 
         ROW_NUMBER() OVER (ORDER BY a.date DESC, a.attendance_id) AS sr_no,
@@ -51,8 +64,9 @@ router.post("/", async (req, res) => {
       LEFT JOIN users u ON a.punched_in_by = u.user_id
       LEFT JOIN users u1 ON a.punched_out_by = u1.user_id
       WHERE a.date = $1
+        ${cityClause}
       ORDER BY a.date DESC, a.attendance_id;`,
-      [date]
+      params
     );
 
     res.json(result.rows);
@@ -88,6 +102,25 @@ router.get("/short-report", async (req, res) => {
   }
 
   try {
+    const cityLookup = await pool.query(
+      `SELECT city_id FROM public.cities WHERE city_name = $1 LIMIT 1`,
+      [cityName]
+    );
+
+    if (cityLookup.rows.length === 0) {
+      return res.status(404).json({ error: "City not found." });
+    }
+
+    const requestedCityId = Number(cityLookup.rows[0].city_id);
+    if (
+      !scope.all &&
+      (!scope.ids || !scope.ids.map(Number).includes(requestedCityId))
+    ) {
+      return res
+        .status(403)
+        .json({ error: "Forbidden: city not assigned to this user." });
+    }
+
     const { rows } = await pool.query(
       `SELECT 
         c.city_name,

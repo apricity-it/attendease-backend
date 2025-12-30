@@ -6,6 +6,7 @@ const {
   authorize,
   invalidatePermissionCache,
 } = require("../middleware/permissionMiddleware");
+const { syncUserCityAccess } = require("../utils/userCityAccess");
 
 const { ensureRbacSchema } = require("../utils/rbacSetup");
 
@@ -75,11 +76,11 @@ const syncRolePermissions = async (roleId, permissions, actorId) => {
   );
 };
 
-const syncUserRoles = async (userId, roles, actorId) => {
-  await pool.query("DELETE FROM user_roles WHERE user_id = $1", [userId]);
+const syncUserRoles = async (userId, roles, actorId, client = pool) => {
+  await client.query("DELETE FROM user_roles WHERE user_id = $1", [userId]);
   if (!roles || roles.length === 0) return;
 
-  await pool.query(
+  await client.query(
     `
       INSERT INTO user_roles (user_id, role_id, assigned_at, assigned_by)
       SELECT $1, role_id, NOW(), $3
@@ -90,8 +91,13 @@ const syncUserRoles = async (userId, roles, actorId) => {
   );
 };
 
-const syncUserPermissions = async (userId, permissions, actorId) => {
-  await pool.query("DELETE FROM user_permissions WHERE user_id = $1", [userId]);
+const syncUserPermissions = async (
+  userId,
+  permissions,
+  actorId,
+  client = pool
+) => {
+  await client.query("DELETE FROM user_permissions WHERE user_id = $1", [userId]);
   if (!permissions || permissions.length === 0) return;
 
   const payload = permissions
@@ -124,7 +130,7 @@ const syncUserPermissions = async (userId, permissions, actorId) => {
     return;
   }
 
-  await pool.query(
+  await client.query(
     `
       INSERT INTO user_permissions (user_id, permission_id, city_id, granted_at, granted_by)
       SELECT
@@ -383,48 +389,61 @@ router.delete("/roles/:roleId", authenticate, assertAdminOrPermission, async (re
 // User management routes
 router.get("/users", authenticate, assertAdminOrPermission, async (req, res) => {
   try {
-    const { rows } = await pool.query(
-      `
-        SELECT
-          u.user_id,
-          u.name,
-          u.email,
-          u.phone,
-          u.emp_code,
-          u.role,
-          u.department,
-          json_build_object(
-            'roles',
-            COALESCE(
-              json_agg(DISTINCT jsonb_build_object('id', r.id, 'name', r.name))
-              FILTER (WHERE r.id IS NOT NULL),
-              '[]'
-            ),
-            'permissions',
-            COALESCE(
-              json_agg(
-                DISTINCT jsonb_build_object(
-                  'id', p.id,
-                  'module', p.module,
-                  'action', p.action,
-                  'label', p.label,
-                  'city_id', up.city_id,
-                  'city_name', ci.city_name
-                )
-              ) FILTER (WHERE p.id IS NOT NULL),
-              '[]'
-            )
-          ) AS access
-        FROM users u
-        LEFT JOIN user_roles ur ON ur.user_id = u.user_id
-        LEFT JOIN roles r ON r.id = ur.role_id
-        LEFT JOIN user_permissions up ON up.user_id = u.user_id
-        LEFT JOIN permissions p ON p.id = up.permission_id
+    const { rows } = await pool.query(`
+      SELECT
+        u.user_id,
+        u.name,
+        u.email,
+        u.phone,
+        u.emp_code,
+        u.role,
+        u.department,
+        json_build_object(
+          'roles',
+          COALESCE(roles.roles, '[]'::json),
+          'permissions',
+          COALESCE(perms.permissions, '[]'::json),
+          'cities',
+          COALESCE(city_access.cities, '[]'::json)
+        ) AS access
+      FROM users u
+      LEFT JOIN LATERAL (
+        SELECT json_agg(
+          DISTINCT jsonb_build_object('id', r.id, 'name', r.name)
+        ) AS roles
+        FROM user_roles ur
+        JOIN roles r ON r.id = ur.role_id
+        WHERE ur.user_id = u.user_id
+      ) roles ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT json_agg(
+          DISTINCT jsonb_build_object(
+            'id', p.id,
+            'module', p.module,
+            'action', p.action,
+            'label', p.label,
+            'city_id', up.city_id,
+            'city_name', ci.city_name
+          )
+        ) AS permissions
+        FROM user_permissions up
+        JOIN permissions p ON p.id = up.permission_id
         LEFT JOIN cities ci ON ci.city_id = up.city_id
-        GROUP BY u.user_id
-        ORDER BY u.user_id DESC
-      `
-    );
+        WHERE up.user_id = u.user_id
+      ) perms ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT json_agg(
+          DISTINCT jsonb_build_object(
+            'city_id', uca.city_id,
+            'city_name', c.city_name
+          )
+        ) AS cities
+        FROM user_city_access uca
+        JOIN cities c ON c.city_id = uca.city_id
+        WHERE uca.user_id = u.user_id
+      ) city_access ON TRUE
+      ORDER BY u.user_id DESC
+    `);
 
     res.json(rows);
   } catch (error) {
@@ -443,6 +462,7 @@ router.post("/users", authenticate, assertAdminOrPermission, async (req, res) =>
     password,
     roles,
     permissions,
+    allowedCities,
   } = req.body || {};
 
   if (!name || !email || !password) {
@@ -499,6 +519,10 @@ router.post("/users", authenticate, assertAdminOrPermission, async (req, res) =>
       await syncUserPermissions(userId, normalizedPermissions, req.user?.user_id);
     }
 
+    if (Array.isArray(allowedCities)) {
+      await syncUserCityAccess(userId, allowedCities, req.user?.user_id);
+    }
+
     invalidatePermissionCache();
     res.status(201).json({ id: userId });
   } catch (error) {
@@ -522,6 +546,7 @@ router.put("/users/:userId", authenticate, assertAdminOrPermission, async (req, 
     password,
     roles,
     permissions,
+    allowedCities,
   } = req.body || {};
 
   try {
@@ -564,14 +589,28 @@ router.put("/users/:userId", authenticate, assertAdminOrPermission, async (req, 
       );
 
       if (Array.isArray(roles)) {
-        await syncUserRoles(userId, roles, req.user?.user_id);
+        await syncUserRoles(userId, roles, req.user?.user_id, client);
       }
 
       if (Array.isArray(permissions)) {
         const normalizedPermissions = await normalizePermissionAssignments(
           permissions
         );
-        await syncUserPermissions(userId, normalizedPermissions, req.user?.user_id);
+        await syncUserPermissions(
+          userId,
+          normalizedPermissions,
+          req.user?.user_id,
+          client
+        );
+      }
+
+      if (Array.isArray(allowedCities)) {
+        await syncUserCityAccess(
+          userId,
+          allowedCities,
+          req.user?.user_id,
+          client
+        );
       }
     });
 

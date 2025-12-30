@@ -622,15 +622,34 @@ const createAttendanceDownloadHandler =
         ? rawLocationType
         : "both";
       const locationExpression = getLocationExpression(locationType);
+      const cityScope = resolveCityScope?.(req) || { all: false, ids: [] };
+      const requestedCityId = parseIntegerParam(req.query.city_id);
+
+      if (!cityScope.all) {
+        const allowedIds = (cityScope.ids || []).map((id) => Number(id));
+        if (!allowedIds.length) {
+          return res
+            .status(403)
+            .json({ error: "No city access assigned. Please contact admin." });
+        }
+        if (
+          requestedCityId !== null &&
+          !allowedIds.includes(Number(requestedCityId))
+        ) {
+          return res.status(403).json({
+            error: "Forbidden: city not assigned to the current user.",
+          });
+        }
+      }
 
       const filterResult =
         requestedGrouping === "supervisor_summary"
           ? buildSupervisorSummaryFilters(req.query, {
-              cityScope: resolveCityScope?.(req),
+              cityScope,
             })
           : buildAttendanceFilters(req.query, {
               locationExpression,
-              cityScope: resolveCityScope?.(req),
+              cityScope,
             });
 
       const { whereClause, params, metadata } = filterResult;

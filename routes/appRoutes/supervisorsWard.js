@@ -2,10 +2,8 @@ const express = require("express");
 const router = express.Router();
 const pool = require("../../config/db");
 const authenticate = require("../../middleware/authMiddleware");
-const {
-  authorize,
-  getPermissionCityFilter,
-} = require("../../middleware/permissionMiddleware");
+const { authorize } = require("../../middleware/permissionMiddleware");
+const { attachCityScope, requireCityScope } = require("../../middleware/cityScope");
 const { buildPublicFaceUrl } = require("../../utils/faceImage");
 const { isBackblazeUrl } = require("../../utils/backblaze");
 
@@ -80,17 +78,17 @@ const normalizeCityIdInput = (value) => {
 };
 
 const enforceCityScope = (req, requestedCityId) => {
-  const scope = getPermissionCityFilter(req, "dashboard", "view");
-  if (!Array.isArray(scope) || scope.length === 0) {
-    return { cityId: requestedCityId, allowed: true };
+  const scope = req.cityScope || { all: false, ids: [] };
+  if (scope.all) {
+    return { cityId: requestedCityId ?? null, allowed: true };
   }
 
-  const allowedCityIds = scope
+  const allowedCityIds = (scope.ids || [])
     .map((cityId) => Number(cityId))
     .filter((cityId) => Number.isFinite(cityId));
 
   if (!allowedCityIds.length) {
-    return { cityId: requestedCityId, allowed: true };
+    return { cityId: null, allowed: false };
   }
 
   if (requestedCityId === null || requestedCityId === undefined) {
@@ -432,7 +430,7 @@ const fetchCitySummary = async (userId, cityId, startDate, endDate) => {
   }));
 };
 
-router.use(authenticate, authorize("dashboard", "view"));
+router.use(authenticate, attachCityScope, requireCityScope(), authorize("dashboard", "view"));
 
 // Summary endpoint for mobile (GET with authentication)
 router.get("/summary", async (req, res) => {

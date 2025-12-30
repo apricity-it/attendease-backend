@@ -5,21 +5,21 @@ const pool = require("../config/db");
 const authenticate = require("../middleware/authMiddleware"); // Ensure users are logged in
 const {
   authorize,
-  getPermissionCityFilter,
 } = require("../middleware/permissionMiddleware");
+const { attachCityScope, requireCityScope } = require("../middleware/cityScope");
 
 const enforceCityScope = (req, requestedCityId) => {
-  const scope = getPermissionCityFilter(req, "supervisors", "view");
-  if (!Array.isArray(scope) || scope.length === 0) {
-    return { cityId: requestedCityId, allowed: true };
+  const scope = req.cityScope || { all: false, ids: [] };
+  if (scope.all) {
+    return { cityId: requestedCityId ?? null, allowed: true };
   }
 
-  const allowedCityIds = scope
+  const allowedCityIds = (scope.ids || [])
     .map((cityId) => Number(cityId))
     .filter((cityId) => Number.isFinite(cityId));
 
   if (!allowedCityIds.length) {
-    return { cityId: requestedCityId, allowed: true };
+    return { cityId: null, allowed: false };
   }
 
   if (requestedCityId === null || requestedCityId === undefined) {
@@ -34,8 +34,10 @@ const enforceCityScope = (req, requestedCityId) => {
   return { cityId: numeric, allowed: allowedCityIds.includes(numeric) };
 };
 
+router.use(authenticate, attachCityScope);
+
 // ✅ Fetch all supervisors (Only Admins can fetch)
-router.get("/", authenticate, authorize("supervisors", "view"), async (req, res) => {
+router.get("/", requireCityScope(), authorize("supervisors", "view"), async (req, res) => {
   const { cityId: rawCityId } = req.query;
 
   let cityId = null;
