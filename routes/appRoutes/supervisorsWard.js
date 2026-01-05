@@ -4,6 +4,7 @@ const pool = require("../../config/db");
 const authenticate = require("../../middleware/authMiddleware");
 const { authorize } = require("../../middleware/permissionMiddleware");
 const { attachCityScope, requireCityScope } = require("../../middleware/cityScope");
+const { attachZoneScope } = require("../../middleware/zoneScope");
 const { buildPublicFaceUrl } = require("../../utils/faceImage");
 const { isBackblazeUrl } = require("../../utils/backblaze");
 
@@ -101,6 +102,21 @@ const enforceCityScope = (req, requestedCityId) => {
   }
 
   return { cityId: numeric, allowed: allowedCityIds.includes(numeric) };
+};
+
+const resolveZoneScope = (req) => {
+  const scope = req.zoneScope || { all: true, ids: [] };
+  if (scope.all) {
+    return [];
+  }
+
+  const allowedZoneIds = Array.isArray(scope.ids)
+    ? scope.ids
+        .map((zoneId) => Number(zoneId))
+        .filter((zoneId) => Number.isFinite(zoneId))
+    : [];
+
+  return allowedZoneIds.length > 0 ? allowedZoneIds : [];
 };
 
 const resolveDateRange = (rawStart, rawEnd) => {
@@ -221,7 +237,8 @@ const fetchSupervisorSummary = async (
   endDate,
   options = {}
 ) => {
-  const { allowCityFallback = false } = options;
+  const { allowCityFallback = false, zoneIds = [] } = options;
+  const hasZoneFilter = Array.isArray(zoneIds) && zoneIds.length > 0;
   const summaryQuery = `
     WITH assigned_employees AS (
       SELECT DISTINCT e.emp_id
@@ -232,6 +249,7 @@ const fetchSupervisorSummary = async (
       LEFT JOIN supervisor_ward sw ON e.ward_id = sw.ward_id
       WHERE ($1::int IS NULL OR sw.supervisor_id = $1::int)
         AND ($4::int IS NULL OR c.city_id = $4::int)
+        ${hasZoneFilter ? "AND z.zone_id = ANY($5::int[])" : ""}
     ),
     attendance_status AS (
       SELECT
@@ -256,12 +274,12 @@ const fetchSupervisorSummary = async (
     FROM attendance_status
   `;
 
-  const result = await pool.query(summaryQuery, [
-    userId ?? null,
-    startDate,
-    endDate,
-    cityId ?? null,
-  ]);
+  const params = [userId ?? null, startDate, endDate, cityId ?? null];
+  if (hasZoneFilter) {
+    params.push(zoneIds);
+  }
+
+  const result = await pool.query(summaryQuery, params);
   const summary = result.rows[0] || {};
 
   const totalEmployees = Number(summary.total_employees) || 0;
@@ -277,6 +295,7 @@ const fetchSupervisorSummary = async (
     // Supervisor has access but no ward assignment; fall back to city-wide view
     return fetchSupervisorSummary(null, cityId, startDate, endDate, {
       allowCityFallback: false,
+      zoneIds,
     });
   }
 
@@ -296,7 +315,8 @@ const fetchSupervisorEmployees = async (
   endDate,
   options = {}
 ) => {
-  const { allowCityFallback = false } = options;
+  const { allowCityFallback = false, zoneIds = [] } = options;
+  const hasZoneFilter = Array.isArray(zoneIds) && zoneIds.length > 0;
   const query = `
     SELECT
       e.emp_id,
@@ -382,28 +402,37 @@ const fetchSupervisorEmployees = async (
     ) summary ON summary.emp_id = e.emp_id
     WHERE ($1::int IS NULL OR u.user_id = $1::int)
       AND ($4::int IS NULL OR c.city_id = $4::int)
+      ${hasZoneFilter ? "AND z.zone_id = ANY($5::int[])" : ""}
     ORDER BY w.ward_id, e.name;
   `;
 
-  const result = await pool.query(query, [
-    userId ?? null,
-    startDate,
-    endDate,
-    cityId ?? null,
-  ]);
+  const params = [userId ?? null, startDate, endDate, cityId ?? null];
+  if (hasZoneFilter) {
+    params.push(zoneIds);
+  }
+
+  const result = await pool.query(query, params);
   const rows = result.rows;
 
   if (allowCityFallback && userId !== null && rows.length === 0) {
     // Supervisor has access but no ward assignment; fall back to city-wide view
     return fetchSupervisorEmployees(null, cityId, startDate, endDate, {
       allowCityFallback: false,
+      zoneIds,
     });
   }
 
   return mapRowsToWards(rows);
 };
 
-const fetchCitySummary = async (userId, cityId, startDate, endDate) => {
+const fetchCitySummary = async (
+  userId,
+  cityId,
+  startDate,
+  endDate,
+  zoneIds = []
+) => {
+  const hasZoneFilter = Array.isArray(zoneIds) && zoneIds.length > 0;
   const query = `
     WITH employee_city AS (
       SELECT DISTINCT
@@ -417,6 +446,7 @@ const fetchCitySummary = async (userId, cityId, startDate, endDate) => {
       LEFT JOIN supervisor_ward sw ON e.ward_id = sw.ward_id
       WHERE ($1::int IS NULL OR sw.supervisor_id = $1::int)
         AND ($4::int IS NULL OR c.city_id = $4::int)
+        ${hasZoneFilter ? "AND z.zone_id = ANY($5::int[])" : ""}
     ),
     attendance_status AS (
       SELECT
@@ -443,12 +473,12 @@ const fetchCitySummary = async (userId, cityId, startDate, endDate) => {
     ORDER BY city_name;
   `;
 
-  const result = await pool.query(query, [
-    userId ?? null,
-    startDate,
-    endDate,
-    cityId ?? null,
-  ]);
+  const params = [userId ?? null, startDate, endDate, cityId ?? null];
+  if (hasZoneFilter) {
+    params.push(zoneIds);
+  }
+
+  const result = await pool.query(query, params);
 
   return result.rows.map((row) => ({
     city_id: row.city_id,
@@ -460,7 +490,13 @@ const fetchCitySummary = async (userId, cityId, startDate, endDate) => {
   }));
 };
 
-router.use(authenticate, attachCityScope, requireCityScope(), authorize("dashboard", "view"));
+router.use(
+  authenticate,
+  attachCityScope,
+  requireCityScope(),
+  attachZoneScope,
+  authorize("dashboard", "view")
+);
 
 // Summary endpoint for mobile (GET with authentication)
 router.get("/summary", async (req, res) => {
@@ -487,6 +523,8 @@ router.get("/summary", async (req, res) => {
       .json({ error: "Forbidden: city not permitted for dashboard" });
   }
 
+  const allowedZoneIds = resolveZoneScope(req);
+
   try {
     const { startDate: startDateRaw, endDate: endDateRaw } = req.query;
     const { startDate, endDate } = resolveDateRange(startDateRaw, endDateRaw);
@@ -495,7 +533,7 @@ router.get("/summary", async (req, res) => {
       scopedCityId,
       startDate,
       endDate,
-      { allowCityFallback: !isAdmin }
+      { allowCityFallback: !isAdmin, zoneIds: allowedZoneIds }
     );
 
     res.json({ success: true, data: summary });
@@ -530,6 +568,8 @@ router.get("/", async (req, res) => {
       .json({ error: "Forbidden: city not permitted for dashboard" });
   }
 
+  const allowedZoneIds = resolveZoneScope(req);
+
   try {
     const { startDate: startDateRaw, endDate: endDateRaw } = req.query;
     const { startDate, endDate } = resolveDateRange(startDateRaw, endDateRaw);
@@ -538,7 +578,7 @@ router.get("/", async (req, res) => {
       scopedCityId,
       startDate,
       endDate,
-      { allowCityFallback: !isAdmin }
+      { allowCityFallback: !isAdmin, zoneIds: allowedZoneIds }
     );
 
     res.json({ success: true, data: response });
@@ -579,13 +619,16 @@ router.post("/city-summary", async (req, res) => {
       .json({ error: "Forbidden: city not permitted for dashboard" });
   }
 
+  const allowedZoneIds = resolveZoneScope(req);
+
   try {
     const { startDate, endDate } = resolveDateRange(startDateRaw, endDateRaw);
     const summary = await fetchCitySummary(
       effectiveUserId,
       scopedCityId,
       startDate,
-      endDate
+      endDate,
+      allowedZoneIds
     );
 
     res.json({ success: true, data: summary });
@@ -627,6 +670,8 @@ router.post("/summary", async (req, res) => {
       .json({ error: "Forbidden: city not permitted for dashboard" });
   }
 
+  const allowedZoneIds = resolveZoneScope(req);
+
   try {
     const { startDate, endDate } = resolveDateRange(startDateRaw, endDateRaw);
     const summary = await fetchSupervisorSummary(
@@ -634,7 +679,7 @@ router.post("/summary", async (req, res) => {
       scopedCityId,
       startDate,
       endDate,
-      { allowCityFallback: !isAdmin }
+      { allowCityFallback: !isAdmin, zoneIds: allowedZoneIds }
     );
 
     res.json({ success: true, data: summary });
@@ -676,6 +721,8 @@ router.post("/", async (req, res) => {
       .json({ error: "Forbidden: city not permitted for dashboard" });
   }
 
+  const allowedZoneIds = resolveZoneScope(req);
+
   try {
     const { startDate, endDate } = resolveDateRange(startDateRaw, endDateRaw);
     const response = await fetchSupervisorEmployees(
@@ -683,7 +730,7 @@ router.post("/", async (req, res) => {
       scopedCityId,
       startDate,
       endDate,
-      { allowCityFallback: !isAdmin }
+      { allowCityFallback: !isAdmin, zoneIds: allowedZoneIds }
     );
 
     res.json({ success: true, data: response });
