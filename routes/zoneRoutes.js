@@ -4,11 +4,13 @@ const pool = require("../config/db");
 const authenticate = require("../middleware/authMiddleware");
 const { authorize, getPermissionCityFilter } = require("../middleware/permissionMiddleware");
 const { attachCityScope, requireCityScope } = require("../middleware/cityScope");
+const { attachZoneScope } = require("../middleware/zoneScope");
 
 // 🟢 Fetch all zones with city names
 router.get(
   "/",
   authenticate,
+  attachZoneScope,
   attachCityScope,
   requireCityScope(true),
   async (req, res) => {
@@ -44,12 +46,22 @@ router.get(
         params
       );
       const allowedCities = getPermissionCityFilter(req, "city", "view");
+      const zoneScope = req.zoneScope || { all: true, ids: [] };
       let rows = result.rows;
       if (Array.isArray(allowedCities) && allowedCities.length > 0) {
         const allowedSet = new Set(
           allowedCities.map((cityId) => Number(cityId))
         );
         rows = rows.filter((row) => allowedSet.has(Number(row.city_id)));
+      }
+      if (!zoneScope.all) {
+        const allowedZones = Array.isArray(zoneScope.ids)
+          ? zoneScope.ids
+              .map((zoneId) => Number(zoneId))
+              .filter((zoneId) => Number.isFinite(zoneId))
+          : [];
+        const allowedZoneSet = new Set(allowedZones);
+        rows = rows.filter((row) => allowedZoneSet.has(Number(row.zone_id)));
       }
       res.json(rows);
     } catch (error) {
